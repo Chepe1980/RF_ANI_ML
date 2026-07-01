@@ -7,11 +7,6 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import gridspec
 from io import BytesIO
 import base64
-from streamlit_bokeh_events import streamlit_bokeh_events
-from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, HoverTool, CustomJS
-from bokeh.palettes import Category10
-from bokeh.transform import factor_cmap
 import scipy.stats as stats
 from scipy.optimize import curve_fit
 from scipy import signal
@@ -26,6 +21,21 @@ import lasio
 from numpy.fft import fft, ifft, fftfreq, fftshift, ifftshift
 import warnings
 warnings.filterwarnings('ignore')
+
+# Fix for Bokeh/NumPy compatibility
+try:
+    if not hasattr(np, 'bool8'):
+        np.bool8 = np.bool_
+except:
+    pass
+
+# Bokeh imports - using direct imports without streamlit_bokeh_events
+from bokeh.plotting import figure
+from bokeh.models import ColumnDataSource, HoverTool, CustomJS
+from bokeh.palettes import Category10
+from bokeh.transform import factor_cmap
+from bokeh.embed import components
+from bokeh.io import output_notebook, show, save
 
 # Try importing TensorFlow/Keras for CNN
 try:
@@ -77,7 +87,7 @@ class PNNRegressor:
         weights = np.exp(-(distances**2) / (2 * self.sigma**2))
 
         # Weighted prediction
-        predictions = np.sum(weights * self.y_train, axis=1) / np.sum(weights, axis=1)
+        predictions = np.sum(weights * self.y_train, axis=1) / (np.sum(weights, axis=1) + 1e-10)
         return predictions
 
 # ==============================================
@@ -93,11 +103,11 @@ def frm(vp1, vs1, rho1, rho_f1, k_f1, rho_f2, k_f2, k0, mu0, phi):
 
     # Dry rock bulk modulus (Gassmann's equation)
     kdry = (k_s1*((phi*k0)/k_f1 + 1 - phi) - k0) / \
-           ((phi*k0)/k_f1 + (k_s1/k0) - 1 - phi)
+           ((phi*k0)/k_f1 + (k_s1/k0) - 1 - phi + 1e-10)
 
     # Apply Gassmann to get new fluid properties
     k_s2 = kdry + (1 - (kdry/k0))**2 / \
-           ((phi/k_f2) + ((1-phi)/k0) - (kdry/k0**2))
+           ((phi/k_f2) + ((1-phi)/k0) - (kdry/k0**2) + 1e-10)
     rho2 = rho1 - phi*rho_f1 + phi*rho_f2
     mu2 = mu1  # Shear modulus unaffected by fluid change
     vp2 = np.sqrt((k_s2 + (4./3)*mu2) / rho2)
@@ -117,7 +127,7 @@ def critical_porosity_model(vp1, vs1, rho1, rho_f1, k_f1, rho_f2, k_f2, k0, mu0,
     mudry = mu0 * (1 - phi/phi_c)
     
     # Gassmann substitution
-    k_s2 = kdry + (1-(kdry/k0))**2/((phi/k_f2)+((1-phi)/k0)-(kdry/k0**2))
+    k_s2 = kdry + (1-(kdry/k0))**2/((phi/k_f2)+((1-phi)/k0)-(kdry/k0**2)+1e-10)
     rho2 = rho1-phi*rho_f1+phi*rho_f2
     mu2 = mudry
     vp2 = np.sqrt((k_s2+(4./3)*mu2)/rho2)
@@ -133,14 +143,14 @@ def hertz_mindlin_model(vp1, vs1, rho1, rho_f1, k_f1, rho_f2, k_f2, k0, mu0, phi
     k_s1 = rho1*vp1**2 - (4./3.)*mu1
     
     # Hertz-Mindlin dry rock moduli
-    PR0 = (3*k0 - 2*mu0)/(6*k0 + 2*mu0)  # Poisson's ratio
-    kdry = (Cn**2 * (1 - phi)**2 * P * mu0**2 / (18 * np.pi**2 * (1 - PR0)**2))**(1/3)
-    mudry = ((2 + 3*PR0 - PR0**2)/(5*(2 - PR0))) * (
-        (3*Cn**2 * (1 - phi)**2 * P * mu0**2)/(2 * np.pi**2 * (1 - PR0)**2)
+    PR0 = (3*k0 - 2*mu0)/(6*k0 + 2*mu0 + 1e-10)  # Poisson's ratio
+    kdry = (Cn**2 * (1 - phi)**2 * P * mu0**2 / (18 * np.pi**2 * (1 - PR0)**2 + 1e-10))**(1/3)
+    mudry = ((2 + 3*PR0 - PR0**2)/(5*(2 - PR0) + 1e-10)) * (
+        (3*Cn**2 * (1 - phi)**2 * P * mu0**2)/(2 * np.pi**2 * (1 - PR0)**2 + 1e-10)
     )**(1/3)
     
     # Gassmann substitution
-    k_s2 = kdry + (1-(kdry/k0))**2/((phi/k_f2)+((1-phi)/k0)-(kdry/k0**2))
+    k_s2 = kdry + (1-(kdry/k0))**2/((phi/k_f2)+((1-phi)/k0)-(kdry/k0**2)+1e-10)
     rho2 = rho1-phi*rho_f1+phi*rho_f2
     mu2 = mudry
     vp2 = np.sqrt((k_s2+(4./3)*mu2)/rho2)
@@ -154,26 +164,26 @@ def dvorkin_nur_model(vp1, vs1, rho1, rho_f1, k_f1, rho_f2, k_f2, k0, mu0, phi, 
     vs1 = vs1/1000.
     
     # Hertz-Mindlin for dry rock moduli at critical porosity
-    PR0 = (3*k0 - 2*mu0)/(6*k0 + 2*mu0)  # Poisson's ratio
+    PR0 = (3*k0 - 2*mu0)/(6*k0 + 2*mu0 + 1e-10)  # Poisson's ratio
     
     # Dry rock moduli at critical porosity
-    k_hm = (Cn**2 * (1-phi_c)**2 * P * mu0**2 / (18 * np.pi**2 * (1-PR0)**2))**(1/3)
-    mu_hm = ((2 + 3*PR0 - PR0**2)/(5*(2-PR0))) * (
-        (3*Cn**2 * (1-phi_c)**2 * P * mu0**2)/(2*np.pi**2*(1-PR0)**2)
+    k_hm = (Cn**2 * (1-phi_c)**2 * P * mu0**2 / (18 * np.pi**2 * (1-PR0)**2 + 1e-10))**(1/3)
+    mu_hm = ((2 + 3*PR0 - PR0**2)/(5*(2-PR0) + 1e-10)) * (
+        (3*Cn**2 * (1-phi_c)**2 * P * mu0**2)/(2*np.pi**2*(1-PR0)**2 + 1e-10)
     )**(1/3)
     
     # Modified Hashin-Shtrikman lower bound for dry rock
-    k_dry = (phi/phi_c)/(k_hm + (4/3)*mu_hm) + (1 - phi/phi_c)/(k0 + (4/3)*mu_hm)
-    k_dry = 1/k_dry - (4/3)*mu_hm
+    k_dry = (phi/phi_c)/(k_hm + (4/3)*mu_hm + 1e-10) + (1 - phi/phi_c)/(k0 + (4/3)*mu_hm + 1e-10)
+    k_dry = 1/(k_dry + 1e-10) - (4/3)*mu_hm
     k_dry = np.maximum(k_dry, 0)  # Ensure positive values
     
-    mu_dry = (phi/phi_c)/(mu_hm + (mu_hm/6)*((9*k_hm + 8*mu_hm)/(k_hm + 2*mu_hm))) + \
-             (1 - phi/phi_c)/(mu0 + (mu_hm/6)*((9*k_hm + 8*mu_hm)/(k_hm + 2*mu_hm)))
-    mu_dry = 1/mu_dry - (mu_hm/6)*((9*k_hm + 8*mu_hm)/(k_hm + 2*mu_hm))
+    mu_dry = (phi/phi_c)/(mu_hm + (mu_hm/6)*((9*k_hm + 8*mu_hm)/(k_hm + 2*mu_hm + 1e-10)) + 1e-10) + \
+             (1 - phi/phi_c)/(mu0 + (mu_hm/6)*((9*k_hm + 8*mu_hm)/(k_hm + 2*mu_hm + 1e-10)) + 1e-10)
+    mu_dry = 1/(mu_dry + 1e-10) - (mu_hm/6)*((9*k_hm + 8*mu_hm)/(k_hm + 2*mu_hm + 1e-10))
     mu_dry = np.maximum(mu_dry, 0)
     
     # Gassmann fluid substitution
-    k_sat = k_dry + (1 - (k_dry/k0))**2 / ((phi/k_f2) + ((1-phi)/k0) - (k_dry/k0**2))
+    k_sat = k_dry + (1 - (k_dry/k0))**2 / ((phi/k_f2) + ((1-phi)/k0) - (k_dry/k0**2) + 1e-10)
     rho2 = rho1 - phi*rho_f1 + phi*rho_f2
     vp2 = np.sqrt((k_sat + (4/3)*mu_dry)/rho2) * 1000  # Convert back to m/s
     vs2 = np.sqrt(mu_dry/rho2) * 1000
@@ -211,13 +221,13 @@ def ricker_wavelet(frequency, length=0.128, dt=0.001):
 def smith_gidlow(vp1, vp2, vs1, vs2, rho1, rho2):
     """Calculate Smith-Gidlow AVO attributes (intercept, gradient)"""
     # Calculate reflectivities
-    rp = 0.5 * (vp2 - vp1) / (vp2 + vp1) + 0.5 * (rho2 - rho1) / (rho2 + rho1)
-    rs = 0.5 * (vs2 - vs1) / (vs2 + vs1) + 0.5 * (rho2 - rho1) / (rho2 + rho1)
+    rp = 0.5 * (vp2 - vp1) / (vp2 + vp1 + 1e-10) + 0.5 * (rho2 - rho1) / (rho2 + rho1 + 1e-10)
+    rs = 0.5 * (vs2 - vs1) / (vs2 + vs1 + 1e-10) + 0.5 * (rho2 - rho1) / (rho2 + rho1 + 1e-10)
     
     # Smith-Gidlow coefficients
     intercept = rp
     gradient = rp - 2 * rs
-    fluid_factor = rp + 1.16 * (vp1/vs1) * rs
+    fluid_factor = rp + 1.16 * (vp1/vs1 + 1e-10) * rs
     
     return intercept, gradient, fluid_factor
 
@@ -233,10 +243,10 @@ def calculate_reflection_coefficients(vp1, vp2, vs1, vs2, rho1, rho2, angle):
     drho = rho2 - rho1
     
     a = 0.5 * (1 + np.tan(theta)**2)
-    b = -4 * (vs_avg**2/vp_avg**2) * np.sin(theta)**2
-    c = 0.5 * (1 - 4 * (vs_avg**2/vp_avg**2) * np.sin(theta)**2)
+    b = -4 * (vs_avg**2/vp_avg**2 + 1e-10) * np.sin(theta)**2
+    c = 0.5 * (1 - 4 * (vs_avg**2/vp_avg**2 + 1e-10) * np.sin(theta)**2)
     
-    rc = a*(dvp/vp_avg) + b*(dvs/vs_avg) + c*(drho/rho_avg)
+    rc = a*(dvp/vp_avg + 1e-10) + b*(dvs/vs_avg + 1e-10) + c*(drho/rho_avg + 1e-10)
     return rc
 
 def fit_avo_curve(angles, rc_values):
@@ -263,7 +273,7 @@ def calc_rc(vp_mod, rho_mod):
     for i in range(0, nint):
         buf1 = vp_mod[i+1]*rho_mod[i+1]-vp_mod[i]*rho_mod[i]
         buf2 = vp_mod[i+1]*rho_mod[i+1]+vp_mod[i]*rho_mod[i]
-        buf3 = buf1/buf2
+        buf3 = buf1/(buf2 + 1e-10)
         rc_int.append(buf3)
     return rc_int
 
@@ -304,7 +314,7 @@ def plot_vawig(axhdl, data, t, excursion, highlight=None):
     t = np.hstack([0, t, t.max()])
     
     for i in range(0, ntrc):
-        tbuf = excursion * data[i] / np.max(np.abs(data)) + i
+        tbuf = excursion * data[i] / (np.max(np.abs(data)) + 1e-10) + i
         tbuf = np.hstack([i, tbuf, i])
             
         if i==highlight:
@@ -341,7 +351,7 @@ def calculate_anisotropic_velocities(df):
     
     # Calculate epsilon if Cij are available
     if all(col in df_result.columns for col in ['c11', 'c33']):
-        df_result['epsilon'] = (df_result['c11'] - df_result['c33']) / (2 * df_result['c33'])
+        df_result['epsilon'] = (df_result['c11'] - df_result['c33']) / (2 * df_result['c33'] + 1e-10)
     
     # Ensure epsilon exists
     if 'epsilon' not in df_result.columns:
@@ -367,7 +377,7 @@ def calculate_anisotropic_velocities(df):
     df_result['anisotropy_delta'] = df_result['delta'] * 100
     
     # Calculate VP variation percentage
-    df_result['VP_variation'] = ((df_result['VP_90'] - df_result['VP_0']) / df_result['VP_0']) * 100
+    df_result['VP_variation'] = ((df_result['VP_90'] - df_result['VP_0']) / (df_result['VP_0'] + 1e-10)) * 100
     
     return df_result
 
@@ -471,10 +481,10 @@ def train_ml_models(X, y_dict, test_size=0.2, random_state=42):
             X_test_cnn = X_test_dict[target].reshape(-1, n_features, 1)
             
             # Adjust kernel sizes based on feature count
-            kernel_size1 = min(3, n_features)
-            kernel_size2 = min(2, n_features // 2)
-            pool_size1 = min(2, n_features // 2)
-            pool_size2 = min(2, n_features // 4)
+            kernel_size1 = min(3, max(1, n_features))
+            kernel_size2 = min(2, max(1, n_features // 2))
+            pool_size1 = min(2, max(1, n_features // 2))
+            pool_size2 = min(2, max(1, n_features // 4))
             
             model = Sequential([
                 Conv1D(filters=32, kernel_size=kernel_size1, activation='relu', 
@@ -795,9 +805,9 @@ def process_data(uploaded_file, model_choice, **kwargs):
         mu = np.resize(np.array(mu), np.shape(f))
         
         k_u = np.sum(f*k, axis=1)
-        k_l = 1. / np.sum(f/k, axis=1)
+        k_l = 1. / (np.sum(f/k, axis=1) + 1e-10)
         mu_u = np.sum(f*mu, axis=1)
-        mu_l = 1. / np.sum(f/mu, axis=1)
+        mu_l = 1. / (np.sum(f/mu, axis=1) + 1e-10)
         k0 = (k_u+k_l)/2.
         mu0 = (mu_u+mu_l)/2.
         return k_u, k_l, mu_u, mu_l, k0, mu0
@@ -867,7 +877,7 @@ def process_data(uploaded_file, model_choice, **kwargs):
         logs[f'VS_FRM{case}'] = vs
         logs[f'RHO_FRM{case}'] = rho
         logs[f'IP_FRM{case}'] = vp * rho
-        logs[f'VPVS_FRM{case}'] = vp / vs
+        logs[f'VPVS_FRM{case}'] = vp / (vs + 1e-10)
     
     # Store in session state
     st.session_state.logs = logs
@@ -876,11 +886,92 @@ def process_data(uploaded_file, model_choice, **kwargs):
     return logs
 
 # ==============================================
+# BOKEH CROSSPLOT FUNCTION (FIXED)
+# ==============================================
+
+def create_bokeh_crossplot(logs):
+    """Create interactive Bokeh crossplot using components"""
+    try:
+        # Prepare data
+        plot_data = logs[['IP_FRMMIX', 'VPVS_FRMMIX', 'DEPTH']].copy()
+        plot_data = plot_data.dropna()
+        
+        # Filter unrealistic values
+        plot_data = plot_data[
+            (plot_data['IP_FRMMIX'] > 0) & 
+            (plot_data['IP_FRMMIX'] < 30000) & 
+            (plot_data['VPVS_FRMMIX'] > 1.0) & 
+            (plot_data['VPVS_FRMMIX'] < 4.0)
+        ]
+        
+        if len(plot_data) == 0:
+            st.warning("No valid data for crossplot")
+            return None
+        
+        # Create Bokeh figure
+        source = ColumnDataSource(plot_data)
+        p = figure(width=800, height=500, 
+                   tools="pan,wheel_zoom,box_zoom,reset,box_select,lasso_select",
+                   title="IP vs Vp/Vs Crossplot")
+        
+        p.scatter('IP_FRMMIX', 'VPVS_FRMMIX', source=source, size=5, 
+                  alpha=0.6, color='navy')
+        
+        p.xaxis.axis_label = 'IP (m/s*g/cc)'
+        p.yaxis.axis_label = 'Vp/Vs'
+        
+        hover = HoverTool(tooltips=[
+            ("Depth", "@DEPTH{0.2f}"),
+            ("IP", "@IP_FRMMIX{0.2f}"),
+            ("Vp/Vs", "@VPVS_FRMMIX{0.2f}")
+        ])
+        p.add_tools(hover)
+        
+        # Generate components
+        script, div = components(p)
+        
+        # Display with HTML
+        st.components.v1.html(
+            f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <link rel="stylesheet" href="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.3.min.css" 
+                      type="text/css" />
+                <script type="text/javascript" src="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.3.min.js"></script>
+                {script}
+            </head>
+            <body>
+                {div}
+            </body>
+            </html>
+            """,
+            height=550,
+            scrolling=True
+        )
+        
+        return p
+        
+    except Exception as e:
+        st.warning(f"Bokeh crossplot error: {str(e)}")
+        # Fallback to matplotlib
+        fig, ax = plt.subplots(figsize=(8, 5))
+        if 'IP_FRMMIX' in logs.columns and 'VPVS_FRMMIX' in logs.columns:
+            ax.scatter(logs['IP_FRMMIX'], logs['VPVS_FRMMIX'], alpha=0.5, s=5)
+            ax.set_xlabel('IP (m/s*g/cc)')
+            ax.set_ylabel('Vp/Vs')
+            ax.set_title('IP vs Vp/Vs Crossplot')
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+            plt.close()
+        return None
+
+# ==============================================
 # MAIN APPLICATION
 # ==============================================
 
 def main():
-    st.title("Enhanced Rock Physics & AVO Modeling with Anisotropy Analysis")
+    st.title("🌍 Enhanced Rock Physics & AVO Modeling with Anisotropy Analysis")
     st.markdown("""
     This comprehensive tool combines:
     - **Rock Physics Modeling**: Gassmann, Critical Porosity, Hertz-Mindlin, Dvorkin-Nur, Raymer-Hunt
@@ -892,7 +983,7 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.header("Configuration")
+        st.header("⚙️ Configuration")
         
         # Mode selection
         mode = st.radio(
@@ -903,7 +994,7 @@ def main():
         )
         
         # File upload
-        st.subheader("Data Upload")
+        st.subheader("📂 Data Upload")
         uploaded_file = st.file_uploader(
             "Upload CSV or LAS file",
             type=["csv", "las"],
@@ -911,7 +1002,7 @@ def main():
         )
         
         if mode in ["Rock Physics & AVO", "Combined Analysis"]:
-            st.subheader("Rock Physics Model")
+            st.subheader("🔬 Rock Physics Model")
             model_options = [
                 "Gassmann's Fluid Substitution",
                 "Critical Porosity Model (Nur)",
@@ -977,7 +1068,7 @@ def main():
             sand_cutoff = st.slider("Sand Cutoff (VSH)", 0.0, 0.3, 0.12, 0.01)
         
         if mode in ["Anisotropy & ML Prediction", "Combined Analysis"]:
-            st.subheader("Anisotropy Parameters")
+            st.subheader("📐 Anisotropy Parameters")
             
             # Thomsen parameters
             st.markdown("**Thomsen Parameters**")
@@ -987,7 +1078,7 @@ def main():
                                            help="Thomsen's delta parameter")
             
             # ML settings
-            st.markdown("**Machine Learning Settings**")
+            st.markdown("**🤖 Machine Learning Settings**")
             ml_models_selected = st.multiselect(
                 "Select ML Models",
                 ["Random Forest", "PNN", "CNN"],
@@ -998,7 +1089,7 @@ def main():
             test_size = st.slider("Test Split Size", 0.1, 0.4, 0.2, 0.05)
             
             # ML training button
-            run_ml = st.button("Run Machine Learning", use_container_width=True)
+            run_ml = st.button("🚀 Run Machine Learning", use_container_width=True)
         
         # Wedge modeling
         if mode in ["Rock Physics & AVO", "Combined Analysis"]:
@@ -1024,7 +1115,7 @@ def main():
             
             # Process based on mode
             if mode in ["Rock Physics & AVO", "Combined Analysis"]:
-                st.header("Rock Physics Analysis")
+                st.header("🔬 Rock Physics Analysis")
                 
                 # Process data with rock physics
                 kwargs = {
@@ -1200,10 +1291,25 @@ def main():
                     if show_wedge:
                         st.header("Seismic Wedge Modeling")
                         st.info("Wedge modeling would be displayed here")
+                        
+                        # Simplified wedge model
+                        st.subheader("Wedge Model Parameters")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            wedge_vp1 = st.number_input("Layer 1 VP (m/s)", value=float(logs.VP.mean()), step=100)
+                            wedge_vs1 = st.number_input("Layer 1 VS (m/s)", value=float(logs.VS.mean()), step=50)
+                            wedge_rho1 = st.number_input("Layer 1 Rho (g/cc)", value=float(logs.RHO.mean()), step=0.1)
+                        with col2:
+                            wedge_vp2 = st.number_input("Layer 2 VP (m/s)", value=float(logs.VP.mean()*1.2), step=100)
+                            wedge_vs2 = st.number_input("Layer 2 VS (m/s)", value=float(logs.VS.mean()*1.1), step=50)
+                            wedge_rho2 = st.number_input("Layer 2 Rho (g/cc)", value=float(logs.RHO.mean()*1.05), step=0.1)
+                        
+                        if st.button("Generate Wedge Model"):
+                            st.info("Wedge model generation would run here")
             
             # Anisotropy & ML Analysis
             if mode in ["Anisotropy & ML Prediction", "Combined Analysis"]:
-                st.header("Anisotropy & Machine Learning Analysis")
+                st.header("📐 Anisotropy & Machine Learning Analysis")
                 
                 # Calculate anisotropic velocities
                 df_aniso = calculate_anisotropic_velocities(df)
@@ -1217,7 +1323,7 @@ def main():
                 with col3:
                     st.metric("VP(90)", f"{df_aniso['VP_90'].mean():.0f} m/s")
                 with col4:
-                    variation = ((df_aniso['VP_90'].mean() - df_aniso['VP_0'].mean()) / df_aniso['VP_0'].mean()) * 100
+                    variation = ((df_aniso['VP_90'].mean() - df_aniso['VP_0'].mean()) / (df_aniso['VP_0'].mean() + 1e-10)) * 100
                     st.metric("Anisotropy", f"{variation:.1f}%")
                 
                 # Anisotropy visualization
@@ -1278,7 +1384,7 @@ def main():
                 # Machine Learning Analysis
                 if 'run_ml' in locals() and run_ml:
                     with st.spinner("🚀 Training Machine Learning models..."):
-                        st.subheader("Machine Learning Results")
+                        st.subheader("🤖 Machine Learning Results")
                         
                         # Prepare data
                         X_scaled, y_dict, scaler, features = prepare_ml_data(df_aniso)
@@ -1440,14 +1546,14 @@ def main():
     st.markdown("---")
     st.markdown("""
     **Enhanced Rock Physics & AVO Tool with Anisotropy** | 
-    Built with Streamlit | 
-    [GitHub Repository](https://github.com/your-repo)
+    Built with Streamlit
     
-    **Features**: Rock Physics Models (Gassmann, Critical Porosity, Hertz-Mindlin, Dvorkin-Nur, Raymer-Hunt) | 
-    AVO Analysis | 
-    Wedge Modeling | 
-    Anisotropy (VP(0), VP(45), VP(90)) | 
-    Machine Learning (RF, PNN, CNN)
+    **Features**: 
+    - Rock Physics Models (Gassmann, Critical Porosity, Hertz-Mindlin, Dvorkin-Nur, Raymer-Hunt)
+    - AVO Analysis
+    - Wedge Modeling
+    - Anisotropy (VP(0), VP(45), VP(90))
+    - Machine Learning (RF, PNN, CNN)
     """)
 
 if __name__ == "__main__":
